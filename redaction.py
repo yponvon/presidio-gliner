@@ -673,6 +673,25 @@ class GLiNER2Recognizer(EntityRecognizer):
         threshold: float = 0.5,
         supported_language: str = "en",
     ):
+        """
+        Initialise the GLiNER2 recognizer and register it with Presidio.
+
+        Steps:
+          1. Store the label mapping (or fall back to DEFAULT_LABEL_MAPPING).
+          2. Derive the list of Presidio entity types from the mapping values
+             and pass them to the EntityRecognizer base class so Presidio knows
+             which entities this recognizer can return.
+          3. Load the GLiNER2 model from model_path (HuggingFace ID or local path).
+          4. Flatten the mapping keys into _gliner_labels — the list of strings
+             passed to GLiNER2 at inference time.
+
+        Args:
+            model_path: HuggingFace model ID (e.g. "fastino/gliner2-privacy-filter-PII-multi")
+                        or an absolute path to a locally saved model directory.
+            label_mapping: optional dict overriding DEFAULT_LABEL_MAPPING.
+            threshold: minimum GLiNER2 confidence score (0–1) for a span to be kept.
+            supported_language: ISO language code; defaults to "en".
+        """
         self.label_mapping = label_mapping or self.DEFAULT_LABEL_MAPPING
         self.threshold = threshold
 
@@ -688,7 +707,30 @@ class GLiNER2Recognizer(EntityRecognizer):
         self._gliner_labels = list(self.label_mapping.keys())
 
     def load(self) -> None:
+        """Required by Presidio's EntityRecognizer interface; model is loaded in __init__."""
         return
+
+    @staticmethod
+    def _is_label_literal(span_text: str, gliner_label: str) -> bool:
+        """Return True if the matched text is the literal label name — a GLiNER2 false positive.
+
+        GLiNER2 sometimes tags the label description itself (e.g. "contact number")
+        as an entity when no real value is present. These should not be redacted.
+        """
+        return span_text.lower().strip() == gliner_label.lower().replace("_", " ").strip()
+
+    @staticmethod
+    def _is_implausible(span_text: str, presidio_entity: str) -> bool:
+        """Return True if the span is implausible for the given entity type.
+
+        GLiNER2 can hallucinate entity types via broad labels (e.g. tagging 'Mr Tan'
+        as SG_PHONE_NUMBER via the 'contact' label). A phone or account number span
+        with no digits is never valid.
+        """
+        digit_required = {"SG_PHONE_NUMBER", "SG_NRIC_FIN", "ACCOUNT_NUMBER", "SG_POSTAL_CODE"}
+        if presidio_entity in digit_required and not re.search(r'\d', span_text):
+            return True
+        return False
 
     def analyze(
         self,
@@ -696,7 +738,33 @@ class GLiNER2Recognizer(EntityRecognizer):
         entities: List[str],
         nlp_artifacts: NlpArtifacts,
     ) -> List[RecognizerResult]:
+        """
+        Run GLiNER2 over text and return Presidio RecognizerResult spans.
 
+        Called by Presidio's AnalyzerEngine for every text it analyzes.
+
+        Steps:
+          1. Call model.extract_entities() with all GLiNER2 labels and include_spans=True
+             so the result contains character-level start/end positions.
+          2. For each detected (gliner_label, entities) pair:
+             a. Map gliner_label → presidio_entity via self.label_mapping.
+             b. Skip if the entity type is not in the caller's requested entities list.
+             c. For each detected span, extract the matched text (span_text).
+             d. Skip via _is_label_literal if the model literally detected its own
+                label name (e.g. "contact number" tagged as a phone number).
+             e. Skip via _is_implausible if the entity type requires digits but
+                the span has none (e.g. "Mr Tan" tagged as SG_PHONE_NUMBER).
+             f. Append a RecognizerResult with character offsets and confidence score.
+          3. Return the list of validated RecognizerResult objects to Presidio.
+
+        Args:
+            text: the string to analyse (may be a combined multi-row window)
+            entities: entity types requested by the caller (Presidio filters by this)
+            nlp_artifacts: spaCy artifacts from Presidio's NLP engine (not used here)
+
+        Returns:
+            list of RecognizerResult, one per valid detected entity span
+        """
         result = self.model.extract_entities(
             text,
             self._gliner_labels,
@@ -712,6 +780,12 @@ class GLiNER2Recognizer(EntityRecognizer):
                 continue
 
             for e in detected_entities:
+                span_text = text[e["start"]:e["end"]]
+                if self._is_label_literal(span_text, gliner_label):
+                    continue
+                if self._is_implausible(span_text, presidio_entity):
+                    continue
+
                 results.append(
                     RecognizerResult(
                         entity_type=presidio_entity,

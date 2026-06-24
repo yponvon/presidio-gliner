@@ -11,13 +11,13 @@ RUNNING THIS SCRIPT
 -------------------
     python run_redaction.py
 
-NOTE: Set MODEL_PATH below to your local copy of the gliner2-pii model folder
-      (or a HuggingFace model ID if it is published there).
+NOTE: MODEL_PATH uses the HuggingFace model ID — it will be downloaded automatically on first run.
+      Requires: pip install gliner2
 """
 
 from redaction import PIIRedactor, GLiNER2Recognizer
 
-MODEL_PATH = "/path/to/gliner2-pii-model"  # <-- update this
+MODEL_PATH = "fastino/gliner2-privacy-filter-PII-multi"
 
 # --- Step 1: Create the base redactor (rule-based) ---
 redactor = PIIRedactor()
@@ -45,7 +45,7 @@ ENTITIES = PIIRedactor.PII_ENTITIES + [
 
 # --- Step 4: Redact ---
 sample_text = (
-    "Hi, my name is John Tan and my NRIC is S1234567D. "
+    "Hi, my name is John Tan and my NRIC is S12-345-67D. "
     "You can reach me at john.tan@email.com or 91234567. "
     "I stay at Blk 123 Tampines Street 11, #04-56, Singapore 520123. "
     "My SP account number is 1234567890."
